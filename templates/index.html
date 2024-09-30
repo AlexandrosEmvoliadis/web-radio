@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Playlist Manager</title>
+    <style>
+        .drop-zone {
+            border: 2px dashed #ccc;
+            padding: 20px;
+            text-align: center;
+            margin-bottom: 20px;
+            cursor: pointer;
+        }
+        .dropdown {
+            margin-bottom: 20px;
+            width: 100%;
+        }
+        .buttons {
+            margin-bottom: 20px;
+        }
+        ul {
+            list-style-type: none;
+            padding: 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="drop-zone" id="drop-zone">
+        Click to enter the folder path containing audio files
+    </div>
+
+    <select id="fileDropdown" size="10" class="dropdown"></select>
+
+    <div class="buttons">
+        <button id="startShowButton">Start Show</button>
+        <button id="switchToVoiceButton">Switch to Voice</button>
+        <button id="switchToMusicButton">Switch to Music</button>
+    </div>
+
+    <div id="totalDuration">Total Playlist Duration: 00:00:00</div>
+
+    <ul id="playlist">
+        <!-- Playlist items will be shown here -->
+    </ul>
+
+    <script>
+        document.getElementById('drop-zone').addEventListener('click', () => {
+            // Prompt user to input folder path
+            const folderPath = prompt('Enter the folder path (e.g., /home/user/music):');
+            if (folderPath) {
+                loadFolder(folderPath);
+            }
+        });
+
+        function loadFolder(folderPath) {
+            fetch('/load-folder', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    'folderPath': folderPath,
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    populateDropdown(data.files, data.folderPath);
+                } else {
+                    alert(data.message);
+                }
+            });
+        }
+
+        function populateDropdown(files, folderPath) {
+            const dropdown = document.getElementById('fileDropdown');
+            dropdown.innerHTML = '';
+
+            files.forEach(file => {
+                const option = document.createElement('option');
+                option.text = file;
+                option.value = file;
+                option.ondblclick = () => addToPlaylist(file, folderPath);  // Double-click to add to playlist
+                dropdown.appendChild(option);
+            });
+        }
+
+        function addToPlaylist(fileName, folderPath) {
+            fetch('/add-to-playlist', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    'fileName': fileName,
+                    'folderPath': folderPath,
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    updatePlaylistDisplay(data);
+                } else {
+                    alert(data.message);
+                }
+            });
+        }
+
+        function updatePlaylistDisplay(data) {
+            const playlistContainer = document.getElementById('playlist');
+            playlistContainer.innerHTML = ''; // Clear previous content
+
+            data.playlist.forEach((track, index) => {
+                const trackElement = document.createElement('li');
+                trackElement.textContent = `${index + 1}. ${track.name} - ${track.duration}`;
+                playlistContainer.appendChild(trackElement);
+            });
+
+            const totalDurationElement = document.getElementById('totalDuration');
+            totalDurationElement.textContent = `Total Playlist Duration: ${data.totalDuration}`;
+        }
+
+        // Button event listeners
+        document.getElementById('startShowButton').addEventListener('click', () => {
+            fetch('/start-show', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => alert(data.status));
+        });
+
+        document.getElementById('switchToVoiceButton').addEventListener('click', () => {
+            fetch('/switch-to-voice', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => alert(data.status));
+        });
+
+        document.getElementById('switchToMusicButton').addEventListener('click', () => {
+            fetch('/switch-to-music', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => alert(data.status));
+        });
+    </script>
+</body>
+</html>
+
