@@ -25,17 +25,19 @@ output_wav_path = "./stream_output.wav"
 saved_wav_path = "./saved_show.wav"
 liq_script_path = "./stream.liq"
 lock = Lock()
-buffer_duration_ms = 20
+buffer_duration_ms = 10
 sample_rate = 44100
 channels = 2
 sample_width = 2
-audio_queue = Queue(maxsize=10)
+audio_queue = Queue(maxsize=2)
 audio_folder = None
 playlist = []
 total_duration_seconds = 0
 show_start_time = None
 annotations_file_path = 'annotations.json'
-
+mic_queue = Queue(maxsize=2)
+mic_stream = None
+blocksize = 441
 
 @app.route('/')
 def index():
@@ -98,7 +100,6 @@ def get_playlist():
 
 @app.route('/start-show', methods=['POST'])
 def start_show():
-    """Start the audio mixing and streaming process."""
     global is_playing, show_start_time
     with lock:
         if not is_playing:
@@ -108,6 +109,7 @@ def start_show():
                 os.mkfifo(output_wav_path)
             show_start_time = datetime.now()
             create_annotations_file()
+
             if len(playlist) > 0:
                 first_track_path = playlist[0]['path']
                 first_genre = get_genre(first_track_path)
@@ -118,10 +120,9 @@ def start_show():
             Thread(target=mix_audio, daemon=True).start()
             Thread(target=write_to_outputs, daemon=True).start()
             Thread(target=start_liquidsoap, daemon=True).start()
-            # Thread(target=real_time_playback, daemon=True).start()  # Start real-time playback
+
             try:
-                # time.sleep(1)
-                subprocess.Popen(['ffplay', '-autoexit', '-nodisp', '-f', 's16le', '-ar', '44100', '-ac', '2', '-i', output_wav_path],
+                subprocess.Popen(['aplay', '-f', 'S16_LE', '-c', '2', '-r', '44100', output_wav_path],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 print("FFplay started for real-time monitoring.")
             except Exception as e:
@@ -131,10 +132,12 @@ def start_show():
         else:
             return jsonify({'status': 'Show is already running.'})
 
+
 @app.route('/switch-to-voice', methods=['POST'])
 def switch_to_voice():
     """Switch from music to voice with a crossfade."""
     log_annotation('transition')
+    start_mic_capture()
     crossfade_volumes(fade_in_mic=True)
     log_annotation('speech')
     print("Switched to voice mode with crossfade.")
@@ -146,11 +149,22 @@ def switch_to_music():
     """Switch from voice to music with a crossfade."""
     log_annotation('transition')
     crossfade_volumes(fade_in_mic=False)
+    stop_mic_capture()
     current_track = playlist[current_track_index]['path']
     genre = get_genre(current_track)
     log_annotation('music', {'genre': genre})
     print("Switched back to music mode with crossfade.")
     return jsonify({'status': 'Switched back to music mode with crossfade.'})
+
+# This is where the mic_callback function is defined
+def mic_callback(indata, frames, time, status):
+    """Callback to capture mic input and push to queue during crossfade."""
+    if status:
+        print(f"Mic input status: {status}")
+    try:
+        mic_queue.put(indata.copy(), timeout=1)  # Push mic data to queue
+    except Exception as e:
+        print(f"Error enqueuing mic data: {e}")
 
 def create_annotations_file():
     """Create the annotations file at the start of the show."""
@@ -292,51 +306,48 @@ def sound_slice_normalize(sound, sample_rate, target_dBFS):
     return reduce(lambda x, y: x + y, max_min_volume(target_dBFS[0], target_dBFS[1]))
 
 def mix_audio():
-    """Continuously mix the music and simulated voice, adding the result to a queue."""
-    global current_track_index, mic_volume, music_volume, is_playing,playlist
+    """Continuously mix the music and mic input, adding the result to a queue."""
+    global current_track_index, mic_volume, music_volume, is_playing, playlist
     current_track_index = 0
     current_genre = None
 
-    while True:
-        with lock:
-            if not is_playing:
-                break
-
+    while is_playing:
         try:
-            if current_track_index >= len(playlist):
-                print("End of playlist.")
-                with lock:
-                    is_playing = False
-                break
-
+            # Get the current track's music segment
             with lock:
+                if current_track_index >= len(playlist):
+                    print("End of playlist.")
+                    break
+
                 track_path = playlist[current_track_index]['path']
                 music_segment = AudioSegment.from_file(track_path).set_frame_rate(sample_rate).set_channels(1)
                 music_segment = sound_slice_normalize(music_segment, sample_rate, (-20, 0))
-                track_genre = get_genre(track_path)
-                if track_genre != current_genre:
-                    current_genre = track_genre
-                    log_annotation('music', {'genre': current_genre})
-                    print(f"Now playing: {playlist[current_track_index]['name']} - Genre: {current_genre}")
-
 
             for i in range(0, len(music_segment), buffer_duration_ms):
-                with lock:
-                    if not is_playing:
-                        break
-
                 music_chunk = music_segment[i:i + buffer_duration_ms]
                 adjusted_music_chunk = music_chunk.apply_gain(music_volume)
 
-                voice_chunk = generators.Sine(440).to_audio_segment(duration=len(music_chunk)).set_frame_rate(sample_rate).set_channels(1)
-                adjusted_voice_chunk = voice_chunk.apply_gain(mic_volume)
+                # Try to get mic data if capturing (during crossfade)
+                try:
+                    mic_data = mic_queue.get_nowait()
+                    mic_data = (mic_data * 32767).astype(np.int16)
 
-                mixed_chunk = adjusted_music_chunk.overlay(adjusted_voice_chunk)
+                    # Convert the numpy array to raw bytes
+                    mic_data = mic_data.tobytes()
+                    voice_chunk = AudioSegment(
+                        data=mic_data,
+                        sample_width=2,
+                        frame_rate=sample_rate,
+                        channels=1
+                    ).apply_gain(mic_volume)
+                except Empty:
+                    voice_chunk = AudioSegment.silent(duration=buffer_duration_ms, frame_rate=sample_rate)
+
+                # Mix the adjusted music and mic chunks
+                mixed_chunk = adjusted_music_chunk.overlay(voice_chunk)
                 mixed_chunk = mixed_chunk.set_channels(channels)
-                print(f"Music Segment dBFS: {adjusted_music_chunk.dBFS:.2f}, Voice Segment dBFS: {adjusted_voice_chunk.dBFS:.2f}, Mixed dBFS: {mixed_chunk.dBFS:.2f}")
                 mixed_data = mixed_chunk.raw_data
                 audio_queue.put(mixed_data)
-                print(f"Queued mixed audio chunk.")
 
                 time.sleep(len(mixed_data) / (sample_rate * channels * sample_width))
 
@@ -344,8 +355,9 @@ def mix_audio():
                 current_track_index += 1
 
         except Exception as e:
-            print(f"Error during audio mixing: {str(e)}")
+            print(f"Error during audio mixing: {e}")
             break
+
 
 def real_time_playback():
     """Real-time playback using sounddevice."""
@@ -362,6 +374,7 @@ def real_time_playback():
 
             # Make sure the audio data fits the output format (stereo with `frames` number of samples)
             expected_samples = frames * channels
+            print(len(audio_data), expected_samples)
             if len(audio_data) < expected_samples:
                 # Pad with zeros if the data is less than expected
                 audio_data = np.pad(audio_data, (0, expected_samples - len(audio_data)), mode='constant')
@@ -377,7 +390,7 @@ def real_time_playback():
             outdata.fill(0)
 
     # Open sounddevice output stream and start real-time playback
-    with sd.OutputStream(samplerate=sample_rate, channels=channels, callback=callback, dtype='float32', blocksize=1024):
+    with sd.OutputStream(samplerate=sample_rate, channels=channels, callback=callback, dtype='float32', blocksize=882):
         while is_playing or not audio_queue.empty():
             pass  # Keep the stream alive while audio is playing
 
@@ -401,6 +414,23 @@ def write_to_outputs():
     except Exception as e:
         print(f"Error writing to outputs: {e}")
 
+def start_mic_capture():
+    """Start capturing microphone input for crossfade."""
+    global mic_stream
+    if mic_stream is None:
+        mic_stream = sd.InputStream(samplerate=sample_rate, channels=1, callback=mic_callback, device = 9,blocksize=blocksize)
+        mic_stream.start()
+        print("Microphone capture started.")
+
+def stop_mic_capture():
+    """Stop capturing microphone input after crossfade."""
+    global mic_stream
+    if mic_stream is not None:
+        mic_stream.stop()
+        mic_stream.close()
+        mic_stream = None
+        print("Microphone capture stopped.")
+
 def start_liquidsoap():
     """Start Liquidsoap for streaming."""
     try:
@@ -409,4 +439,4 @@ def start_liquidsoap():
         print(f"Error starting Liquidsoap: {e}")
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, use_reloader=False)
