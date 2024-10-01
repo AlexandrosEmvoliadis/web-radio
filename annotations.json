@@ -1,0 +1,22 @@
+{
+    "start_time": "2024-10-01 16:51:27.805243",
+    "annotations": {
+        "00:00:00": {
+            "event": "music",
+            "genre": "Metal"
+        },
+        "00:00:21.060": {
+            "event": "transition"
+        },
+        "00:00:26.073": {
+            "event": "speech"
+        },
+        "00:00:31.441": {
+            "event": "transition"
+        },
+        "00:00:36.453": {
+            "event": "music",
+            "genre": "Metal"
+        }
+    }
+}
